@@ -1,0 +1,858 @@
+<!--
+==============================================================================
+# プログラム名: band_score_splitter_web.html
+# 作成者: Gemini
+# 作成日: 2026-10-29
+#
+# 概要:
+# バンドスコアPDFからパート譜を切り出すWebアプリケーション。
+# ピュアJavaScript(Vanilla JS)実装。ドラッグ操作で領域指定。
+# アップロード直後からプレビューを確認でき、除外ページの検討が可能。
+==============================================================================
+-->
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>バンドスコア パート譜分離アプリ</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- PDF.js 2.16.105 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+    
+    <!-- PDF-Lib & JSZip -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f3f4f6; overflow: hidden; }
+        
+        .loader {
+            border: 4px solid rgba(255,255,255,0.3);
+            border-top: 4px solid white;
+            border-radius: 50%;
+            width: 32px;
+            height: 32px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #f1f1f1; }
+        ::-webkit-scrollbar-thumb { background: #c1c1c1; border-radius: 4px; }
+        
+        /* Disable text selection during drag */
+        .dragging { user-select: none; }
+        .ns-resize { cursor: ns-resize !important; }
+        
+        .step-panel { display: none; }
+        .step-panel.active { display: block; animation: fadeIn 0.3s ease; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+
+        .col-btn { transition: all 0.2s; }
+        .col-btn.active { background-color: #4f46e5; color: white; border-color: #4f46e5; }
+    </style>
+</head>
+<body class="h-screen flex flex-col text-gray-800">
+
+    <!-- Header -->
+    <header class="bg-indigo-900 text-white shadow-md py-3 px-6 flex items-center justify-between z-20 shrink-0">
+        <h1 class="text-lg font-bold flex items-center gap-2">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3"></path></svg>
+            バンドスコア パート分離
+        </h1>
+        <div class="text-sm font-bold opacity-80" id="step-indicator">Step 0 / 4</div>
+    </header>
+
+    <!-- Main Workspace -->
+    <main class="flex-1 flex overflow-hidden">
+        
+        <!-- Left Sidebar: Wizard UI -->
+        <div class="w-80 bg-white border-r border-gray-200 shadow-xl flex flex-col z-10 shrink-0">
+            <div class="p-6 flex-1 overflow-y-auto">
+                
+                <!-- Step 0: Upload & Global -->
+                <div id="step-0" class="step-panel active">
+                    <h2 class="text-lg font-bold text-indigo-900 mb-4 border-b pb-2">PDFアップロード</h2>
+                    <p class="text-sm text-gray-600 mb-4">対象のバンドスコアPDFを選択してください。</p>
+                    
+                    <input type="file" id="file-input" accept="application/pdf" 
+                           class="block w-full text-sm text-gray-600 file:mr-3 file:py-2 file:px-4 file:rounded file:border-0 file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 cursor-pointer mb-6 border border-gray-200 rounded p-1">
+                    
+                    <label class="block text-sm font-bold text-gray-700 mb-2">除外ページ (カンマ区切り)</label>
+                    <p class="text-xs text-gray-500 mb-2">スコア以外の不要なページ番号があれば指定します。(例: 1, 15)</p>
+                    <input type="text" id="exclude-pages" placeholder="例: 1, 15" class="w-full border border-gray-300 rounded px-3 py-2 text-sm outline-none focus:border-indigo-500">
+                </div>
+
+                <!-- Step 1: First Page -->
+                <div id="step-1" class="step-panel">
+                    <h2 class="text-lg font-bold text-indigo-900 mb-4 border-b pb-2">1ページ目の設定</h2>
+                    <p class="text-sm text-gray-600 mb-4">右のプレビュー画面の線をドラッグして、<strong class="text-amber-600">タイトル領域</strong>と<strong class="text-indigo-600">スコア領域</strong>を指定してください。</p>
+                    
+                    <label class="block text-sm font-bold text-gray-700 mb-2">スコアの段組み数</label>
+                    <div class="flex gap-2" id="first-col-btns">
+                        <button class="col-btn flex-1 py-1 border border-gray-300 rounded font-bold hover:bg-gray-100" data-val="1">1段</button>
+                        <button class="col-btn flex-1 py-1 border border-gray-300 rounded font-bold hover:bg-gray-100" data-val="2">2段</button>
+                        <button class="col-btn flex-1 py-1 border border-gray-300 rounded font-bold hover:bg-gray-100" data-val="3">3段</button>
+                        <button class="col-btn flex-1 py-1 border border-gray-300 rounded font-bold hover:bg-gray-100" data-val="4">4段</button>
+                    </div>
+                </div>
+
+                <!-- Step 2: Middle Pages -->
+                <div id="step-2" class="step-panel">
+                    <h2 class="text-lg font-bold text-indigo-900 mb-4 border-b pb-2">途中ページの設定</h2>
+                    <p class="text-sm text-gray-600 mb-4">途中ページの<strong class="text-indigo-600">スコア領域</strong>をドラッグで指定してください。</p>
+                    
+                    <label class="block text-sm font-bold text-gray-700 mb-2">スコアの段組み数</label>
+                    <div class="flex gap-2 mb-6" id="middle-col-btns">
+                        <button class="col-btn flex-1 py-1 border border-gray-300 rounded font-bold hover:bg-gray-100" data-val="1">1段</button>
+                        <button class="col-btn flex-1 py-1 border border-gray-300 rounded font-bold hover:bg-gray-100" data-val="2">2段</button>
+                        <button class="col-btn flex-1 py-1 border border-gray-300 rounded font-bold hover:bg-gray-100" data-val="3">3段</button>
+                        <button class="col-btn flex-1 py-1 border border-gray-300 rounded font-bold hover:bg-gray-100" data-val="4">4段</button>
+                    </div>
+
+                    <label class="flex items-center gap-2 p-3 bg-gray-50 border border-gray-200 rounded cursor-pointer hover:bg-gray-100 transition-colors">
+                        <input type="checkbox" id="last-custom-check" class="w-4 h-4 text-indigo-600 rounded">
+                        <span class="text-sm font-bold text-gray-700">最終ページを個別に設定する</span>
+                    </label>
+                </div>
+
+                <!-- Step 3: Last Page -->
+                <div id="step-3" class="step-panel">
+                    <h2 class="text-lg font-bold text-indigo-900 mb-4 border-b pb-2">最終ページの設定</h2>
+                    <p class="text-sm text-gray-600 mb-4">最終ページ独自の<strong class="text-indigo-600">スコア領域</strong>をドラッグで指定してください。</p>
+                    
+                    <label class="block text-sm font-bold text-gray-700 mb-2">スコアの段組み数</label>
+                    <div class="flex gap-2" id="last-col-btns">
+                        <button class="col-btn flex-1 py-1 border border-gray-300 rounded font-bold hover:bg-gray-100" data-val="1">1段</button>
+                        <button class="col-btn flex-1 py-1 border border-gray-300 rounded font-bold hover:bg-gray-100" data-val="2">2段</button>
+                        <button class="col-btn flex-1 py-1 border border-gray-300 rounded font-bold hover:bg-gray-100" data-val="3">3段</button>
+                        <button class="col-btn flex-1 py-1 border border-gray-300 rounded font-bold hover:bg-gray-100" data-val="4">4段</button>
+                    </div>
+                </div>
+
+                <!-- Step 4: Parts Setup -->
+                <div id="step-4" class="step-panel flex flex-col h-full">
+                    <h2 class="text-lg font-bold text-indigo-900 mb-4 border-b pb-2">パート抽出設定</h2>
+                    <p class="text-sm text-gray-600 mb-4">抽出するパートを追加し、右のプレビュー画面で1段内の<strong class="text-indigo-600">パート領域</strong>をドラッグして設定してください。</p>
+                    
+                    <div class="flex-1 overflow-y-auto pr-2 space-y-3" id="parts-container">
+                        <!-- Parts will be dynamically injected here -->
+                    </div>
+                    
+                    <div class="pt-4 border-t border-gray-200 mt-2">
+                        <button id="add-part-btn" class="w-full py-2 border-2 border-dashed border-gray-300 text-gray-600 font-bold rounded hover:bg-gray-50 hover:border-indigo-400 transition-colors">
+                            + パートを追加
+                        </button>
+                    </div>
+                </div>
+
+            </div>
+            
+            <!-- Navigation Footer -->
+            <div class="p-4 border-t border-gray-200 bg-gray-50 flex gap-2">
+                <button id="btn-back" class="px-4 py-2 bg-white border border-gray-300 rounded font-bold text-gray-700 hover:bg-gray-100 hidden">戻る</button>
+                <button id="btn-next" class="flex-1 px-4 py-2 bg-indigo-600 rounded font-bold text-white hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">次へ</button>
+                <button id="btn-export" class="flex-1 px-4 py-2 bg-green-600 rounded font-bold text-white hover:bg-green-700 transition-colors hidden justify-center items-center">分割を実行</button>
+            </div>
+        </div>
+
+        <!-- Right Preview Area -->
+        <div class="flex-1 bg-gray-300 flex flex-col relative overflow-hidden" id="preview-area">
+            
+            <!-- Preview Toolbar -->
+            <div class="bg-white border-b border-gray-300 p-2 items-center justify-center gap-4 z-10 shadow-sm hidden" id="preview-toolbar">
+                <button id="btn-prev-page" class="px-3 py-1 bg-gray-100 hover:bg-gray-200 border border-gray-300 rounded text-sm font-bold disabled:opacity-50">◀ 前へ</button>
+                <span id="page-indicator" class="text-sm font-bold text-gray-700">ページ: - / -</span>
+                <button id="btn-next-page" class="px-3 py-1 bg-gray-100 hover:bg-gray-200 border border-gray-300 rounded text-sm font-bold disabled:opacity-50">次へ ▶</button>
+            </div>
+
+            <div class="flex-1 overflow-auto p-8 relative flex justify-center items-start" id="scroll-container">
+                <div id="empty-state" class="mt-32 text-gray-500 font-bold text-xl">
+                    対象のPDFファイルを選択してください
+                </div>
+                
+                <!-- Canvas Wrapper -->
+                <div id="canvas-wrapper" class="relative shadow-2xl bg-white hidden" style="display: none;">
+                    <canvas id="pdf-canvas" class="block"></canvas>
+                    <canvas id="overlay-canvas" class="absolute inset-0 block z-10"></canvas>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Export Overlay -->
+    <div id="export-overlay" class="fixed inset-0 bg-gray-900 bg-opacity-80 z-50 hidden flex-col items-center justify-center text-white backdrop-blur-sm">
+        <div class="loader mb-4 border-t-indigo-500 w-12 h-12 border-4"></div>
+        <h2 class="text-xl font-bold mb-2" id="export-status-text">処理中...</h2>
+        <p class="text-gray-300">ブラウザを閉じずにお待ちください</p>
+    </div>
+
+<script>
+    // ==========================================
+    // Configuration & State (Vanilla JS)
+    // ==========================================
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+
+    let state = {
+        step: 0,
+        pdfBytes: null,
+        pdfDoc: null,
+        fileName: 'Score',
+        totalPages: 0,
+        excludePages: [],
+        hasLastCustom: false,
+
+        // Coordinates are normalized 0.0 ~ 1.0
+        layouts: {
+            first:  { cols: 1, title: { top: 0.02, bottom: 0.15 }, score: { top: 0.18, bottom: 0.95 } },
+            middle: { cols: 2, score: { top: 0.05, bottom: 0.95 } },
+            last:   { cols: 1, score: { top: 0.05, bottom: 0.50 } }
+        },
+
+        parts: [
+            { id: 1, name: 'Vocal', start: 0.0, end: 0.25, color: '#ef4444' },
+            { id: 2, name: 'Guitar', start: 0.3, end: 0.55, color: '#3b82f6' }
+        ],
+        partIdCounter: 3,
+
+        // Interaction state
+        hoveredHandle: null,
+        draggingHandle: null,
+        mouseY: 0,
+        pageCache: new Map() // Cache rendered pages
+    };
+
+    const presetColors = ['#ef4444', '#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#14b8a6'];
+    const HANDLE_RADIUS = 6;
+
+    // DOM Elements
+    const els = {
+        fileInput: document.getElementById('file-input'),
+        excludeInput: document.getElementById('exclude-pages'),
+        lastCustomCheck: document.getElementById('last-custom-check'),
+        
+        btnBack: document.getElementById('btn-back'),
+        btnNext: document.getElementById('btn-next'),
+        btnExport: document.getElementById('btn-export'),
+        stepIndicator: document.getElementById('step-indicator'),
+        
+        firstColBtns: document.querySelectorAll('#first-col-btns .col-btn'),
+        middleColBtns: document.querySelectorAll('#middle-col-btns .col-btn'),
+        lastColBtns: document.querySelectorAll('#last-col-btns .col-btn'),
+
+        partsContainer: document.getElementById('parts-container'),
+        addPartBtn: document.getElementById('add-part-btn'),
+        
+        emptyState: document.getElementById('empty-state'),
+        canvasWrapper: document.getElementById('canvas-wrapper'),
+        pdfCanvas: document.getElementById('pdf-canvas'),
+        overlayCanvas: document.getElementById('overlay-canvas'),
+        
+        btnPrevPage: document.getElementById('btn-prev-page'),
+        btnNextPage: document.getElementById('btn-next-page'),
+        pageIndicator: document.getElementById('page-indicator'),
+        previewToolbar: document.getElementById('preview-toolbar'),
+
+        exportOverlay: document.getElementById('export-overlay'),
+        exportStatusText: document.getElementById('export-status-text')
+    };
+
+    // ==========================================
+    // Initialization & Events
+    // ==========================================
+    function init() {
+        els.fileInput.addEventListener('change', handleFileUpload);
+        els.excludeInput.addEventListener('input', parseExcludePages);
+        els.lastCustomCheck.addEventListener('change', (e) => { state.hasLastCustom = e.target.checked; });
+        
+        els.btnNext.addEventListener('click', nextStep);
+        els.btnBack.addEventListener('click', prevStep);
+        els.btnExport.addEventListener('click', handleExport);
+        els.addPartBtn.addEventListener('click', addPart);
+
+        els.btnPrevPage.addEventListener('click', () => changePreviewPage(-1));
+        els.btnNextPage.addEventListener('click', () => changePreviewPage(1));
+
+        setupColButtons(els.firstColBtns, 'first');
+        setupColButtons(els.middleColBtns, 'middle');
+        setupColButtons(els.lastColBtns, 'last');
+
+        // Canvas Interaction Events
+        els.overlayCanvas.addEventListener('mousemove', onCanvasMouseMove);
+        els.overlayCanvas.addEventListener('mousedown', onCanvasMouseDown);
+        window.addEventListener('mouseup', onCanvasMouseUp);
+
+        updateUI();
+    }
+
+    function setupColButtons(buttons, layoutKey) {
+        buttons.forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                buttons.forEach(b => b.classList.remove('active'));
+                e.target.classList.add('active');
+                state.layouts[layoutKey].cols = parseInt(e.target.dataset.val);
+                drawOverlay();
+            });
+        });
+    }
+
+    function changePreviewPage(delta) {
+        if (!state.pdfDoc || state.step !== 0) return;
+        const newPage = state.currentPage + delta;
+        if (newPage >= 1 && newPage <= state.totalPages) {
+            state.currentPage = newPage;
+            renderTargetPage(state.currentPage);
+            updatePageIndicator();
+        }
+    }
+
+    function updatePageIndicator() {
+        els.pageIndicator.textContent = `ページ: ${state.currentPage} / ${state.totalPages}`;
+        els.btnPrevPage.disabled = state.currentPage <= 1;
+        els.btnNextPage.disabled = state.currentPage >= state.totalPages;
+    }
+
+    // ==========================================
+    // Step Navigation
+    // ==========================================
+    function nextStep() {
+        if (state.step === 0 && !state.pdfDoc) return;
+        
+        if (state.step === 2 && !state.hasLastCustom) state.step = 4;
+        else state.step++;
+        
+        updateUI();
+    }
+
+    function prevStep() {
+        if (state.step === 4 && !state.hasLastCustom) state.step = 2;
+        else state.step--;
+        
+        updateUI();
+    }
+
+    function updateUI() {
+        // Toggle Panels
+        document.querySelectorAll('.step-panel').forEach(p => p.classList.remove('active'));
+        document.getElementById(`step-${state.step}`).classList.add('active');
+        
+        els.stepIndicator.textContent = `Step ${state.step} / 4`;
+
+        // Buttons state
+        els.btnBack.classList.toggle('hidden', state.step === 0);
+        els.btnNext.classList.toggle('hidden', state.step === 4);
+        els.btnExport.classList.toggle('hidden', state.step !== 4);
+        
+        els.btnNext.disabled = (state.step === 0 && !state.pdfDoc);
+        els.btnExport.disabled = (state.parts.length === 0);
+
+        // Sync column buttons
+        syncColButtons(els.firstColBtns, state.layouts.first.cols);
+        syncColButtons(els.middleColBtns, state.layouts.middle.cols);
+        syncColButtons(els.lastColBtns, state.layouts.last.cols);
+
+        if (state.step === 4) {
+            renderPartsList();
+        }
+
+        if (state.step === 0 && state.pdfDoc) {
+            els.previewToolbar.classList.remove('hidden');
+            els.previewToolbar.classList.add('flex');
+            updatePageIndicator();
+        } else {
+            els.previewToolbar.classList.add('hidden');
+            els.previewToolbar.classList.remove('flex');
+        }
+
+        // Render corresponding PDF page
+        if (state.pdfDoc) {
+            els.emptyState.style.display = 'none';
+            els.canvasWrapper.style.display = 'inline-block';
+            if (state.step > 0) {
+                renderTargetPage();
+            } else {
+                renderTargetPage(state.currentPage);
+            }
+        } else {
+            els.canvasWrapper.style.display = 'none';
+            els.emptyState.style.display = 'block';
+        }
+    }
+
+    function syncColButtons(buttons, activeVal) {
+        buttons.forEach(btn => {
+            btn.classList.toggle('active', parseInt(btn.dataset.val) === activeVal);
+        });
+    }
+
+    // ==========================================
+    // PDF Handling
+    // ==========================================
+    function parseExcludePages() {
+        const val = els.excludeInput.value;
+        state.excludePages = val.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
+    }
+
+    function getValidPages() {
+        const arr = [];
+        for (let i = 1; i <= state.totalPages; i++) {
+            if (!state.excludePages.includes(i)) arr.push(i);
+        }
+        return arr;
+    }
+
+    async function handleFileUpload(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        state.fileName = file.name.replace(/\.pdf$/i, '');
+        els.btnNext.disabled = true;
+        
+        const reader = new FileReader();
+        reader.onload = async function() {
+            try {
+                state.pdfBytes = new Uint8Array(this.result);
+                const loadingTask = pdfjsLib.getDocument({ data: state.pdfBytes });
+                state.pdfDoc = await loadingTask.promise;
+                state.totalPages = state.pdfDoc.numPages;
+                state.currentPage = 1;
+                state.pageCache.clear();
+                parseExcludePages();
+                els.btnNext.disabled = false;
+                
+                // アップロード完了後、ステップ0のままプレビューを表示
+                updateUI();
+            } catch (error) {
+                console.error(error);
+                alert("PDF読み込みエラー: " + error.message);
+            }
+        };
+        reader.readAsArrayBuffer(file);
+    }
+
+    async function renderTargetPage(forcePage = null) {
+        const valid = getValidPages();
+        if (valid.length === 0 && !forcePage) return;
+
+        let targetPage = forcePage;
+        if (!targetPage) {
+            if (state.step === 1) targetPage = valid[0];
+            else if (state.step === 2) targetPage = valid.length > 1 ? valid[1] : valid[0];
+            else if (state.step === 3) targetPage = valid[valid.length - 1];
+            else if (state.step === 4) targetPage = valid.length > 1 ? valid[1] : valid[0];
+        }
+
+        state.currentPage = targetPage;
+
+        try {
+            const page = await state.pdfDoc.getPage(targetPage);
+            const viewport = page.getViewport({ scale: 1.5 });
+            
+            els.pdfCanvas.width = viewport.width;
+            els.pdfCanvas.height = viewport.height;
+            els.overlayCanvas.width = viewport.width;
+            els.overlayCanvas.height = viewport.height;
+            els.canvasWrapper.style.width = viewport.width + 'px';
+            els.canvasWrapper.style.height = viewport.height + 'px';
+
+            const ctx = els.pdfCanvas.getContext('2d', { alpha: false });
+            
+            // Check cache
+            if (!state.pageCache.has(targetPage)) {
+                await page.render({ canvasContext: ctx, viewport }).promise;
+                state.pageCache.set(targetPage, els.pdfCanvas.toDataURL());
+            } else {
+                const img = new Image();
+                img.onload = () => { ctx.drawImage(img, 0, 0); drawOverlay(); };
+                img.src = state.pageCache.get(targetPage);
+            }
+            
+            drawOverlay();
+        } catch (err) {
+            console.error('Render error:', err);
+        }
+    }
+
+    // ==========================================
+    // Parts UI
+    // ==========================================
+    function renderPartsList() {
+        els.partsContainer.innerHTML = '';
+        state.parts.forEach((part, index) => {
+            const div = document.createElement('div');
+            div.className = 'bg-white border rounded p-3 flex items-center gap-3 shadow-sm relative overflow-hidden';
+            
+            div.innerHTML = `
+                <div class="absolute left-0 top-0 bottom-0 w-1.5" style="background-color: ${part.color}"></div>
+                <input type="text" value="${part.name}" data-idx="${index}" class="part-name font-bold text-sm flex-1 border-b border-gray-200 focus:border-indigo-500 outline-none ml-1">
+                <button data-idx="${index}" class="part-del text-gray-400 hover:text-red-500 font-bold p-1">&times;</button>
+            `;
+            els.partsContainer.appendChild(div);
+        });
+
+        document.querySelectorAll('.part-name').forEach(el => {
+            el.addEventListener('input', (e) => {
+                state.parts[e.target.dataset.idx].name = e.target.value;
+                drawOverlay();
+            });
+        });
+        document.querySelectorAll('.part-del').forEach(el => {
+            el.addEventListener('click', (e) => {
+                state.parts.splice(e.target.dataset.idx, 1);
+                updateUI();
+                drawOverlay();
+            });
+        });
+    }
+
+    function addPart() {
+        const color = presetColors[state.parts.length % presetColors.length];
+        state.parts.push({
+            id: state.partIdCounter++,
+            name: `Part ${state.parts.length + 1}`,
+            start: 0.1, end: 0.3,
+            color: color
+        });
+        updateUI();
+        drawOverlay();
+    }
+
+    // ==========================================
+    // Canvas Overlay & Dragging
+    // ==========================================
+    function getMouseCoords(e) {
+        const rect = els.overlayCanvas.getBoundingClientRect();
+        const scaleY = els.overlayCanvas.height / rect.height;
+        return (e.clientY - rect.top) * scaleY;
+    }
+
+    function getActiveHandles() {
+        const h = els.overlayCanvas.height;
+        let handles = [];
+        
+        if (state.step === 1) {
+            const lay = state.layouts.first;
+            handles.push({ id: 'first_title_top', y: lay.title.top * h, val: lay.title.top });
+            handles.push({ id: 'first_title_bottom', y: lay.title.bottom * h, val: lay.title.bottom });
+            handles.push({ id: 'first_score_top', y: lay.score.top * h, val: lay.score.top });
+            handles.push({ id: 'first_score_bottom', y: lay.score.bottom * h, val: lay.score.bottom });
+        } else if (state.step === 2) {
+            const lay = state.layouts.middle;
+            handles.push({ id: 'middle_score_top', y: lay.score.top * h, val: lay.score.top });
+            handles.push({ id: 'middle_score_bottom', y: lay.score.bottom * h, val: lay.score.bottom });
+        } else if (state.step === 3) {
+            const lay = state.layouts.last;
+            handles.push({ id: 'last_score_top', y: lay.score.top * h, val: lay.score.top });
+            handles.push({ id: 'last_score_bottom', y: lay.score.bottom * h, val: lay.score.bottom });
+        } else if (state.step === 4) {
+            const lay = state.layouts.middle;
+            const colH = (lay.score.bottom - lay.score.top) / lay.cols;
+            const startY = lay.score.top * h;
+            const pxColH = colH * h;
+            
+            state.parts.forEach((p, i) => {
+                handles.push({ id: `part_${i}_start`, y: startY + p.start * pxColH, val: p.start });
+                handles.push({ id: `part_${i}_end`, y: startY + p.end * pxColH, val: p.end });
+            });
+        }
+        return handles;
+    }
+
+    function onCanvasMouseMove(e) {
+        state.mouseY = getMouseCoords(e);
+        
+        if (state.draggingHandle) {
+            updateDragValue();
+            drawOverlay();
+            return;
+        }
+
+        const handles = getActiveHandles();
+        state.hoveredHandle = null;
+        
+        for (let handle of handles) {
+            if (Math.abs(state.mouseY - handle.y) <= HANDLE_RADIUS * 2) {
+                state.hoveredHandle = handle;
+                break;
+            }
+        }
+        
+        document.body.classList.toggle('ns-resize', !!state.hoveredHandle);
+        drawOverlay();
+    }
+
+    function onCanvasMouseDown(e) {
+        if (state.hoveredHandle) {
+            state.draggingHandle = state.hoveredHandle;
+            document.body.classList.add('dragging');
+        }
+    }
+
+    function onCanvasMouseUp() {
+        if (state.draggingHandle) {
+            state.draggingHandle = null;
+            document.body.classList.remove('dragging', 'ns-resize');
+            drawOverlay();
+        }
+    }
+
+    function updateDragValue() {
+        const h = els.overlayCanvas.height;
+        let normY = state.mouseY / h;
+        const dragId = state.draggingHandle.id;
+        const minGap = 0.02;
+
+        if (state.step === 1) {
+            const lay = state.layouts.first;
+            if (dragId === 'first_title_top') lay.title.top = Math.max(0, Math.min(normY, lay.title.bottom - minGap));
+            if (dragId === 'first_title_bottom') lay.title.bottom = Math.max(lay.title.top + minGap, Math.min(normY, 1));
+            if (dragId === 'first_score_top') lay.score.top = Math.max(0, Math.min(normY, lay.score.bottom - minGap));
+            if (dragId === 'first_score_bottom') lay.score.bottom = Math.max(lay.score.top + minGap, Math.min(normY, 1));
+        } else if (state.step === 2) {
+            const lay = state.layouts.middle;
+            if (dragId === 'middle_score_top') lay.score.top = Math.max(0, Math.min(normY, lay.score.bottom - minGap));
+            if (dragId === 'middle_score_bottom') lay.score.bottom = Math.max(lay.score.top + minGap, Math.min(normY, 1));
+        } else if (state.step === 3) {
+            const lay = state.layouts.last;
+            if (dragId === 'last_score_top') lay.score.top = Math.max(0, Math.min(normY, lay.score.bottom - minGap));
+            if (dragId === 'last_score_bottom') lay.score.bottom = Math.max(lay.score.top + minGap, Math.min(normY, 1));
+        } else if (state.step === 4) {
+            const lay = state.layouts.middle;
+            const colH = (lay.score.bottom - lay.score.top) / lay.cols;
+            let relY = (normY - lay.score.top) / colH; // Normalized relative to the first column
+            
+            const match = dragId.match(/part_(\d+)_(start|end)/);
+            if (match) {
+                const pIdx = parseInt(match[1]);
+                const type = match[2];
+                const p = state.parts[pIdx];
+                if (type === 'start') p.start = Math.max(0, Math.min(relY, p.end - minGap));
+                if (type === 'end') p.end = Math.max(p.start + minGap, Math.min(relY, 1));
+            }
+        }
+    }
+
+    function drawOverlay() {
+        const canvas = els.overlayCanvas;
+        const ctx = canvas.getContext('2d');
+        const w = canvas.width;
+        const h = canvas.height;
+        ctx.clearRect(0, 0, w, h);
+
+        if (state.step === 0) return;
+
+        // Base Dark Mask
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+        ctx.fillRect(0, 0, w, h);
+
+        let layout = state.layouts.middle;
+        if (state.step === 1) layout = state.layouts.first;
+        if (state.step === 3) layout = state.layouts.last;
+
+        // Cut out Title (Step 1 only)
+        if (state.step === 1) {
+            const tTop = layout.title.top * h;
+            const tBottom = layout.title.bottom * h;
+            ctx.clearRect(0, tTop, w, tBottom - tTop);
+            
+            ctx.strokeStyle = '#f59e0b';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(0, tTop, w, tBottom - tTop);
+            ctx.fillStyle = '#f59e0b';
+            ctx.fillRect(0, tBottom - 20, 100, 20);
+            ctx.fillStyle = '#fff';
+            ctx.font = 'bold 12px sans-serif';
+            ctx.fillText('タイトル領域', 10, tBottom - 6);
+        }
+
+        // Cut out Score
+        const sTop = layout.score.top * h;
+        const sBottom = layout.score.bottom * h;
+        const sHeight = sBottom - sTop;
+
+        if (state.step < 4) {
+            ctx.clearRect(0, sTop, w, sHeight);
+            
+            // Draw column separators
+            const colH = sHeight / layout.cols;
+            for (let i = 1; i < layout.cols; i++) {
+                ctx.beginPath();
+                ctx.setLineDash([6, 6]);
+                ctx.moveTo(0, sTop + i * colH);
+                ctx.lineTo(w, sTop + i * colH);
+                ctx.strokeStyle = '#9ca3af';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+            ctx.strokeStyle = '#4f46e5';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(0, sTop, w, sHeight);
+            ctx.fillStyle = '#4f46e5';
+            ctx.fillRect(0, sBottom - 20, 80, 20);
+            ctx.fillStyle = '#fff';
+            ctx.font = 'bold 12px sans-serif';
+            ctx.fillText('スコア領域', 10, sBottom - 6);
+        } 
+        else if (state.step === 4) {
+            // Only clear the first column to show context
+            const colH = sHeight / layout.cols;
+            ctx.clearRect(0, sTop, w, colH);
+            
+            ctx.fillStyle = 'rgba(255,255,255,0.7)';
+            ctx.fillRect(0, sTop + colH, w, sHeight - colH); // Semi-fade other columns
+
+            // Draw parts inside the first column
+            state.parts.forEach(p => {
+                const pTop = sTop + (p.start * colH);
+                const pBottom = sTop + (p.end * colH);
+                
+                // Color overlay
+                ctx.fillStyle = p.color + '40'; // add transparency hex
+                ctx.fillRect(0, pTop, w, pBottom - pTop);
+                
+                // Left border
+                ctx.fillStyle = p.color;
+                ctx.fillRect(0, pTop, 4, pBottom - pTop);
+
+                // Label
+                ctx.fillStyle = 'rgba(0,0,0,0.7)';
+                const txtW = ctx.measureText(p.name).width;
+                ctx.fillRect(8, pTop + 4, txtW + 16, 20);
+                ctx.fillStyle = '#fff';
+                ctx.font = 'bold 12px sans-serif';
+                ctx.fillText(p.name, 16, pTop + 18);
+            });
+        }
+
+        // Draw Handles
+        const handles = getActiveHandles();
+        handles.forEach(h => {
+            const isHover = (state.hoveredHandle && state.hoveredHandle.id === h.id) || (state.draggingHandle && state.draggingHandle.id === h.id);
+            ctx.beginPath();
+            ctx.moveTo(w * 0.2, h.y);
+            ctx.lineTo(w * 0.8, h.y);
+            ctx.lineWidth = isHover ? 6 : 2;
+            ctx.strokeStyle = '#4f46e5';
+            if (h.id.startsWith('part_')) {
+                const pIdx = parseInt(h.id.split('_')[1]);
+                ctx.strokeStyle = state.parts[pIdx].color;
+            }
+            ctx.stroke();
+        });
+    }
+
+    // ==========================================
+    // Export Logic
+    // ==========================================
+    async function handleExport() {
+        const validPages = getValidPages();
+        if (!state.pdfBytes || validPages.length === 0) return;
+        
+        els.exportOverlay.classList.remove('hidden');
+        els.exportOverlay.classList.add('flex');
+        
+        try {
+            const zip = new JSZip();
+            const { PDFDocument } = PDFLib;
+            const srcDoc = await PDFDocument.load(state.pdfBytes);
+
+            // Get standard page size from original Page 1
+            const firstPageBox = srcDoc.getPage(validPages[0] - 1).getMediaBox();
+            const origX = firstPageBox.x || 0;
+            const origY = firstPageBox.y || 0;
+            const origWidth = firstPageBox.width;
+            const origHeight = firstPageBox.height;
+
+            for (let i = 0; i < state.parts.length; i++) {
+                const part = state.parts[i];
+                els.exportStatusText.textContent = `${part.name} を切り出し中 (${i+1}/${state.parts.length})...`;
+                
+                const outDoc = await PDFDocument.create();
+                let currentOutPage = outDoc.addPage([origWidth, origHeight]);
+                let currentY = origHeight; // PDF coordinates: bottom is 0, top is origHeight
+
+                async function addStrip(pNum, normTop, normBottom) {
+                    const srcPage = srcDoc.getPage(pNum - 1);
+                    
+                    const pdfTop = origY + origHeight * (1 - normTop);
+                    const pdfBottom = origY + origHeight * (1 - normBottom);
+                    const stripHeight = pdfTop - pdfBottom;
+
+                    if (stripHeight <= 0) return;
+
+                    // If strip doesn't fit, add new page
+                    if (currentY - stripHeight < -1) { 
+                        currentOutPage = outDoc.addPage([origWidth, origHeight]);
+                        currentY = origHeight;
+                    }
+
+                    const embeddedStrip = await outDoc.embedPage(srcPage, {
+                        left: origX, right: origX + origWidth, bottom: pdfBottom, top: pdfTop
+                    });
+
+                    currentY -= stripHeight;
+                    currentOutPage.drawPage(embeddedStrip, {
+                        x: 0, y: currentY, width: origWidth, height: stripHeight
+                    });
+                }
+
+                // 1. Embed Title (only once per part)
+                const titleLayout = state.layouts.first.title;
+                if (titleLayout.bottom > titleLayout.top) {
+                    await addStrip(validPages[0], titleLayout.top, titleLayout.bottom);
+                }
+
+                // 2. Extract specific part region from every valid page & column
+                for (let pNum of validPages) {
+                    let lay = state.layouts.middle;
+                    if (pNum === validPages[0]) lay = state.layouts.first;
+                    else if (pNum === validPages[validPages.length - 1] && state.hasLastCustom) lay = state.layouts.last;
+                    
+                    const colH = (lay.score.bottom - lay.score.top) / lay.cols;
+                    
+                    for (let c = 0; c < lay.cols; c++) {
+                        const colTop = lay.score.top + (c * colH);
+                        const pStart = colTop + (part.start * colH);
+                        const pEnd = colTop + (part.end * colH);
+                        await addStrip(pNum, pStart, pEnd);
+                    }
+                }
+                
+                const pdfBytesOut = await outDoc.save();
+                zip.file(`${state.fileName}_${part.name}.pdf`, pdfBytesOut);
+                
+                await new Promise(res => setTimeout(res, 50)); // Yield to UI
+            }
+
+            els.exportStatusText.textContent = "ZIPファイルを生成中...";
+            await new Promise(res => setTimeout(res, 50));
+
+            const zipBlob = await zip.generateAsync({ type: "blob" });
+            const url = URL.createObjectURL(zipBlob);
+            
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${state.fileName}_Parts.zip`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+
+        } catch (err) {
+            console.error(err);
+            alert("ZIP生成中にエラーが発生しました: " + err.message);
+        } finally {
+            els.exportOverlay.classList.remove('flex');
+            els.exportOverlay.classList.add('hidden');
+        }
+    }
+
+    window.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>
